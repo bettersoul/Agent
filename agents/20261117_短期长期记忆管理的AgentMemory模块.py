@@ -1,190 +1,123 @@
 """
-AI Agent 每日代码 · 2026-11-17
-主题：短期/长期记忆管理的 Agent Memory 模块
-由 agent-green 自动生成。
+短期/长期记忆管理的 Agent Memory 模块
+Auto-generated module skeleton.
 """
 
-"""Agent Memory 模块 —— 短期/长期记忆管理。
-
-日期标记: 2026-11-17
-设计要点:
-  - 短期记忆(S短期上下文): 固定容量 FIFO/LRU 淘汰, 随会话结束丢弃。
-  - 长期记忆(长期知识库): 带关键词/标签索引, 相似度检索后持久化。
-  - 统一的 MemoryStore 对外暴露 remember/recall/forget 接口。
-"""
+"""短期/长期记忆管理模块（2026-11-17）。"""
 
 from __future__ import annotations
 
-import math
-import re
-import time
-from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from datetime import datetime, timezone
+from typing import Iterable
 
 
 @dataclass
-class MemoryRecord:
-    """单条记忆记录。"""
+class MemoryItem:
+    """单条记忆。"""
 
-    key: str
     content: str
-    tags: Set[str] = field(default_factory=set)
-    score: float = 1.0
-    created_at: float = field(default_factory=time.time)
-    hits: int = 0
-
-    def tokens(self) -> List[str]:
-        """把内容切成用于相似度计算的 token 列表。"""
-        return [t for t in re.split(r"[\W_]+", self.content.lower()) if t]
-
-
-def _cosine(a: Sequence[str], b: Sequence[str]) -> float:
-    """基于 token 集合的余弦相似度(可复现、无外部依赖)。"""
-    sa, sb = set(a), set(b)
-    if not sa or not sb:
-        return 0.0
-    inter = len(sa & sb)
-    if inter == 0:
-        return 0.0
-    return inter / math.sqrt(len(sa) * len(sb))
-
-
-class ShortTermMemory:
-    """短期记忆: 容量受限的会话工作区, 超出容量按 LRU 淘汰。"""
-
-    def __init__(self, capacity: int = 10) -> None:
-        self.capacity = max(1, capacity)
-        self._items: "OrderedDict[str, MemoryRecord]" = OrderedDict()
-
-    def put(self, record: MemoryRecord) -> None:
-        self._items[record.key] = record
-        self._items.move_to_end(record.key)
-        while len(self._items) > self.capacity:
-            self._items.popitem(last=False)
-
-    def get(self, key: str) -> Optional[MemoryRecord]:
-        rec = self._items.get(key)
-        if rec is not None:
-            self._items.move_to_end(key)
-        return rec
-
-    def keys(self) -> List[str]:
-        return list(self._items.keys())
-
-    def clear(self) -> None:
-        self._items.clear()
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-
-class LongTermMemory:
-    """长期记忆: 按标签建立倒排索引, 支持关键词 + 相似度检索。"""
-
-    def __init__(self) -> None:
-        self._records: Dict[str, MemoryRecord] = {}
-        self._index: Dict[str, Set[str]] = defaultdict(set)
-
-    def put(self, record: MemoryRecord) -> None:
-        self._records[record.key] = record
-        for tag in record.tags:
-            self._index[tag].add(record.key)
-
-    def get(self, key: str) -> Optional[MemoryRecord]:
-        return self._records.get(key)
-
-    def search(self, query: str, tags: Iterable[str] = (), top_k: int = 5) -> List[MemoryRecord]:
-        """检索长期记忆: 标签过滤 + 余弦相似度排序。"""
-        want = {t.lower() for t in tags}
-        qtok = re.split(r"[\W_]+", query.lower())
-        scored: List[Tuple[float, MemoryRecord]] = []
-        for rec in self._records.values():
-            if want and not (want & {t.lower() for t in rec.tags}):
-                continue
-            s = _cosine(qtok, rec.tokens()) + 0.1 * len(want & {t.lower() for t in rec.tags})
-            if s > 0:
-                scored.append((s, rec))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        for _, rec in scored[:top_k]:
-            rec.hits += 1
-        return [rec for _, rec in scored[:top_k]]
-
-    def forget(self, key: str) -> bool:
-        rec = self._records.pop(key, None)
-        if rec is None:
-            return False
-        for tag in rec.tags:
-            self._index[tag].discard(key)
-        return True
-
-    def __len__(self) -> int:
-        return len(self._records)
+    importance: float = 0.5
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    tags: set[str] = field(default_factory=set)
 
 
 class AgentMemory:
-    """Agent 记忆门面: 短期缓冲 + 长期库, 统一 remember/recall/forget。"""
+    """管理短期会话记忆，并按重要度归档长期记忆。"""
 
-    def __init__(self, short_capacity: int = 8) -> None:
-        self.short = ShortTermMemory(short_capacity)
-        self.long = LongTermMemory()
-        self._seq = 0
+    def __init__(self, short_limit: int = 10, long_limit: int = 100) -> None:
+        if short_limit < 1 or long_limit < 1:
+            raise ValueError("记忆容量必须大于零")
+        self.short_limit = short_limit
+        self.long_limit = long_limit
+        self.short: list[MemoryItem] = []
+        self.long: list[MemoryItem] = []
 
-    def _next_key(self, prefix: str) -> str:
-        self._seq += 1
-        return f"{prefix}-{self._seq}"
+    def remember(
+        self,
+        content: str,
+        importance: float = 0.5,
+        tags: Iterable[str] = (),
+    ) -> MemoryItem:
+        """保存记忆；容量不足时优先淘汰低价值短期记忆。"""
+        if not content.strip():
+            raise ValueError("记忆内容不能为空")
+        if not 0 <= importance <= 1:
+            raise ValueError("importance 必须位于 0 到 1 之间")
 
-    def remember(self, content: str, tags: Iterable[str] = (),
-                 persist: bool = True, key: Optional[str] = None) -> MemoryRecord:
-        """写入记忆。persist=True 同时进入长期记忆。"""
-        rec = MemoryRecord(key=key or self._next_key("mem"), content=content,
-                           tags={t.lower() for t in tags})
-        self.short.put(rec)
-        if persist:
-            self.long.put(rec)
-        return rec
+        item = MemoryItem(content.strip(), importance, tags=set(tags))
+        self.short.append(item)
+        self.short.sort(key=lambda memory: memory.created_at)
+        while len(self.short) > self.short_limit:
+            index = min(
+                range(len(self.short)),
+                key=lambda i: (self.short[i].importance, self.short[i].created_at),
+            )
+            self.long.append(self.short.pop(index))
+        self._trim_long()
+        return item
 
-    def recall(self, query: str = "", tags: Iterable[str] = (), top_k: int = 5) -> List[MemoryRecord]:
-        """召回记忆: 优先检索长期库, 关键词命中短期记忆时提升其分数。"""
-        results = self.long.search(query, tags, top_k)
-        short_hit = self.short.get(query) if query else None
-        if short_hit is not None and short_hit not in results:
-            results.insert(0, short_hit)
-        return results[:top_k]
+    def recall(self, query: str = "", limit: int = 5) -> list[MemoryItem]:
+        """按关键词和重要度召回最近记忆。"""
+        if limit < 1:
+            return []
+        terms = {term.lower() for term in query.split() if term}
+        candidates = self.short + self.long
+        matches = [
+            item
+            for item in candidates
+            if not terms
+            or terms.intersection(
+                {word.lower() for word in item.content.split()}
+                | {tag.lower() for tag in item.tags}
+            )
+        ]
+        matches.sort(
+            key=lambda item: (item.importance, item.created_at),
+            reverse=True,
+        )
+        return matches[:limit]
 
-    def forget(self, key: str) -> bool:
-        """遗忘: 从短期与长期记忆中移除。"""
-        self.short.get(key)  # 触发 LRU 更新
-        self.short._items.pop(key, None)
-        return self.long.forget(key)
+    def forget(self, content: str) -> int:
+        """删除内容完全匹配的记忆，返回删除数量。"""
+        target = content.strip()
+        removed = 0
+        for collection in (self.short, self.long):
+            before = len(collection)
+            collection[:] = [item for item in collection if item.content != target]
+            removed += before - len(collection)
+        return removed
 
-    def stats(self) -> Dict[str, Any]:
-        return {"short": len(self.short), "long": len(self.long), "seq": self._seq}
+    def promote(self, content: str) -> bool:
+        """将指定短期记忆提升为长期记忆。"""
+        for index, item in enumerate(self.short):
+            if item.content == content.strip():
+                self.short.pop(index)
+                self.long.append(item)
+                self._trim_long()
+                return True
+        return False
 
+    def _trim_long(self) -> None:
+        """限制长期记忆数量，优先保留高价值和新记忆。"""
+        self.long.sort(key=lambda item: (item.importance, item.created_at))
+        while len(self.long) > self.long_limit:
+            self.long.pop(0)
 
-def llm_summarize(memory: List[MemoryRecord]) -> str:
-    """占位: 实际项目中替换为真实 LLM 调用, 用于压缩长期记忆。"""
-    return "\n".join(f"- [{','.join(sorted(r.tags)) or 'untagged'}] {r.content}" for r in memory)
+    def summary(self) -> dict[str, int]:
+        """返回当前记忆数量统计。"""
+        return {"short": len(self.short), "long": len(self.long)}
 
 
 if __name__ == "__main__":
-    mem = AgentMemory(short_capacity=3)
-    mem.remember("用户喜欢 Python 异步编程", tags=["user", "pref"], persist=True)
-    mem.remember("项目使用 FastAPI 与 PostgreSQL", tags=["project"], persist=True)
-    mem.remember("临时: 调试中的堆栈信息", tags=["debug"], persist=False)
-    mem.remember("用户时区为 Asia/Shanghai", tags=["user", "pref"], persist=True)
+    memory = AgentMemory(short_limit=3, long_limit=5)
+    memory.remember("用户喜欢 Python", importance=0.9, tags=["偏好"])
+    memory.remember("今天讨论 Agent 架构", importance=0.7, tags=["工作"])
+    memory.remember("临时任务：修复测试", importance=0.2)
+    memory.remember("用户偏好简洁回答", importance=0.8, tags=["偏好"])
+    memory.remember("历史项目使用 PostgreSQL", importance=0.6)
 
-    print("统计:", mem.stats())
-    print("\n-- 召回(user 偏好) --")
-    for r in mem.recall("用户 偏好 时区", tags=["user"], top_k=3):
-        print(f"  {r.score:.2f} hits={r.hits} {r.content}")
-
-    print("\n-- 短期记忆 LRU 淘汰 --")
-    print("  keys:", mem.short.keys())
-
-    print("\n-- 遗忘 --")
-    mem.forget("mem-2")
-    print("  统计:", mem.stats())
-
-    print("\n-- 压缩摘要(LLM 占位) --")
-    print(llm_summarize(mem.recall(top_k=5)))
+    print("统计：", memory.summary())
+    print("召回：", [item.content for item in memory.recall("偏好")])
+    print("提升：", memory.promote("用户喜欢 Python"))
+    print("长期记忆：", [item.content for item in memory.long])
