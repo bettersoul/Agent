@@ -1,3 +1,3 @@
-# agent-green
+# agent
 
-Auto-generated AI Agent code lands here daily.
+
